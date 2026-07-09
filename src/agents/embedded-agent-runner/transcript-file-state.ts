@@ -50,7 +50,9 @@ const SUCCESSOR_ROTATION_SMALL_FILE_BYTES =
 const SUCCESSOR_ROTATION_PREFIX_SCAN_BYTES = 64 * 1024;
 
 const successorRotationPrefixCarryTypes = new Set<string>([
+  "branch_summary",
   "custom",
+  "custom_message",
   "label",
   "leaf",
   "model_change",

@@ -347,6 +347,80 @@ describe("rotateTranscriptAfterCompaction", () => {
     expect(custom.data).toEqual({ cursor: "before-tail" });
   });
 
+  it("falls back for preserved sibling entries outside the sampled tail", async () => {
+    const dir = await createTmpDir();
+    const manager = SessionManager.create(dir, dir);
+
+    manager.appendMessage({ role: "user", content: "start", timestamp: 1 });
+    const branchFromId = manager.appendMessage(makeAssistant("ready", 2));
+    const branchSummaryId = manager.branchWithSummary(
+      branchFromId,
+      "Preserved sibling branch summary.",
+    );
+    const customMessageId = manager.appendCustomMessageEntry(
+      "test",
+      "preserved sibling custom message",
+      true,
+    );
+    manager.branch(branchFromId);
+
+    for (let index = 0; index < 900; index += 1) {
+      manager.appendMessage({
+        role: "user",
+        content: `historical prompt ${index} ${"x".repeat(900)}`,
+        timestamp: index * 2 + 3,
+      });
+      manager.appendMessage(
+        makeAssistant(`historical answer ${index} ${"y".repeat(900)}`, index * 2 + 4),
+      );
+    }
+
+    const firstKeptId = manager.appendMessage({
+      role: "user",
+      content: "kept deployment prompt",
+      timestamp: 5_002,
+    });
+    manager.appendMessage(makeAssistant("kept deployment answer", 5_003));
+    manager.appendCompaction("Summary of the long historical transcript.", firstKeptId, 200_000);
+    manager.appendMessage({
+      role: "user",
+      content: "post compaction followup",
+      timestamp: 5_004,
+    });
+
+    const sessionFile = requireString(manager.getSessionFile(), "source session file");
+    const sourcePath = path.resolve(sessionFile);
+    const sourceBytes = (await fs.stat(sourcePath)).size;
+    const readFileSpy = vi.spyOn(fs, "readFile");
+
+    const result = await rotateTranscriptFileAfterCompaction({
+      sessionFile: sourcePath,
+      now: () => new Date("2026-07-09T20:30:00.000Z"),
+    });
+
+    expect(result.rotated).toBe(true);
+    expect(sourceBytes).toBeGreaterThan(1024 * 1024);
+    expect(readFileSpy.mock.calls.some(([file]) => readFileCallMatchesPath(file, sourcePath))).toBe(
+      true,
+    );
+    const successor = SessionManager.open(requireString(result.sessionFile, "successor file"));
+    const successorEntries = successor.getEntries();
+    const branchSummary = requireEntryByIdAndType(
+      successorEntries,
+      branchSummaryId,
+      "branch_summary",
+      "preserved branch summary",
+    );
+    const customMessage = requireEntryByIdAndType(
+      successorEntries,
+      customMessageId,
+      "custom_message",
+      "preserved custom message",
+    );
+    expect(branchSummary.summary).toBe("Preserved sibling branch summary.");
+    expect(customMessage.content).toBe("preserved sibling custom message");
+  });
+
   it("keeps the paired tool result without replaying summarized custom context", async () => {
     const dir = await createTmpDir();
     const manager = SessionManager.create(dir, dir);
