@@ -328,6 +328,79 @@ describe("rotateTranscriptAfterCompaction", () => {
     ]);
   });
 
+  it("falls back to the full reader before migrating a long legacy transcript", async () => {
+    const dir = await createTmpDir();
+    const manager = SessionManager.create(dir, dir);
+
+    for (let index = 0; index < 900; index += 1) {
+      manager.appendMessage({
+        role: "user",
+        content: `historical prompt ${index} ${"x".repeat(900)}`,
+        timestamp: index * 2 + 1,
+      });
+      manager.appendMessage(
+        makeAssistant(`historical answer ${index} ${"y".repeat(900)}`, index * 2 + 2),
+      );
+    }
+
+    const firstKeptId = manager.appendMessage({
+      role: "user",
+      content: "legacy kept deployment prompt",
+      timestamp: 5_002,
+    });
+    manager.appendMessage(makeAssistant("legacy kept deployment answer", 5_003));
+    manager.appendCompaction("Summary of the legacy transcript.", firstKeptId, 200_000);
+    manager.appendMessage({
+      role: "user",
+      content: "legacy post compaction followup",
+      timestamp: 5_004,
+    });
+
+    const sessionFile = requireString(manager.getSessionFile(), "source session file");
+    const sourcePath = path.resolve(sessionFile);
+    const records = (await fs.readFile(sourcePath, "utf8"))
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const firstKeptIndex = records.findIndex((entry) => entry.id === firstKeptId);
+    const compaction = records.find((entry) => entry.type === "compaction");
+    if (firstKeptIndex < 0 || !compaction) {
+      throw new Error("expected legacy compaction fixture entries");
+    }
+    for (const entry of records) {
+      if (entry.type === "session") {
+        delete entry.version;
+      } else {
+        delete entry.id;
+        delete entry.parentId;
+      }
+    }
+    compaction.firstKeptEntryIndex = firstKeptIndex;
+    delete compaction.firstKeptEntryId;
+    await fs.writeFile(sourcePath, `${records.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+
+    const sourceBytes = (await fs.stat(sourcePath)).size;
+    const readFileSpy = vi.spyOn(fs, "readFile");
+    const result = await rotateTranscriptFileAfterCompaction({
+      sessionFile: sourcePath,
+      now: () => new Date("2026-07-09T21:30:00.000Z"),
+    });
+
+    expect(result.rotated).toBe(true);
+    expect(sourceBytes).toBeGreaterThan(1024 * 1024);
+    expect(readFileSpy.mock.calls.some(([file]) => readFileCallMatchesPath(file, sourcePath))).toBe(
+      true,
+    );
+    const successor = SessionManager.open(requireString(result.sessionFile, "successor file"));
+    expect(readUserTexts(successor.getEntries())).toEqual([
+      "legacy kept deployment prompt",
+      "legacy post compaction followup",
+    ]);
+    expect(JSON.stringify(successor.buildSessionContext().messages)).toContain(
+      "Summary of the legacy transcript.",
+    );
+  });
+
   it("falls back when preserved state is outside the sampled tail", async () => {
     const dir = await createTmpDir();
     const manager = SessionManager.create(dir, dir);

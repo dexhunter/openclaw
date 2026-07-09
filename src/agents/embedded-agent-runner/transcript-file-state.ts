@@ -985,8 +985,10 @@ async function readSuccessorRotationFileEntries(sessionFile: string): Promise<Fi
       headBuffer.toString("utf-8", 0, headRead.bytesRead),
       { dropLeadingPartial: false, dropTrailingPartial: headRead.bytesRead < size },
     );
-    const header = headRecords.find((entry) => entry.type === "session");
-    if (!header) {
+    const header = headRecords.find(
+      (entry): entry is Record<string, unknown> & SessionHeader => entry.type === "session",
+    );
+    if (!header || sessionHeaderVersion(header) !== CURRENT_SESSION_VERSION) {
       return null;
     }
 
