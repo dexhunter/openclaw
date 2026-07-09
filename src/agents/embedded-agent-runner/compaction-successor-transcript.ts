@@ -11,6 +11,7 @@ import { collectDuplicateUserMessageEntryIdsForCompaction } from "./compaction-d
 import { stripThinkingSignaturesFromMessage } from "./thinking.js";
 import {
   readTranscriptFileState,
+  readTranscriptFileStateForSuccessorRotation,
   TranscriptFileState,
   writeTranscriptFileAtomic,
 } from "./transcript-file-state.js";
@@ -91,12 +92,44 @@ export async function rotateTranscriptFileAfterCompaction(params: {
   sessionFile: string;
   now?: () => Date;
 }): Promise<CompactionTranscriptRotation> {
-  const state = await readTranscriptFileState(params.sessionFile);
+  const state = await readTranscriptFileStateForSuccessorRotation(params.sessionFile);
+  const sessionManager = isCompleteSuccessorRotationState(state)
+    ? state
+    : await readTranscriptFileState(params.sessionFile);
   return rotateTranscriptAfterCompaction({
-    sessionManager: state,
+    sessionManager,
     sessionFile: params.sessionFile,
     ...(params.now ? { now: params.now } : {}),
   });
+}
+
+function isCompleteSuccessorRotationState(state: ReadonlySessionManagerForRotation): boolean {
+  const branch = state.getBranch();
+  const latestCompactionIndex = findLatestCompactionIndex(branch);
+  if (latestCompactionIndex < 0) {
+    return false;
+  }
+
+  const compaction = branch[latestCompactionIndex] as CompactionEntry;
+  if (compaction.firstKeptEntryId === compaction.id) {
+    return true;
+  }
+  if (!compaction.firstKeptEntryId) {
+    return false;
+  }
+
+  const firstKeptIndex = branch.findIndex((entry) => entry.id === compaction.firstKeptEntryId);
+  if (firstKeptIndex <= 0) {
+    return false;
+  }
+
+  // The partial reader has already refused samples with preserved prefix
+  // metadata/control rows outside the tail. The remaining branch check proves
+  // the assistant turn that rotation intentionally preserves is still present
+  // before trusting the sampled state.
+  return branch
+    .slice(0, firstKeptIndex)
+    .some((entry) => entry.type === "message" && entry.message.role === "assistant");
 }
 
 function findLatestCompactionIndex(entries: SessionEntry[]): number {
