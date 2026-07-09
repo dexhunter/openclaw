@@ -990,7 +990,11 @@ async function readSuccessorRotationFileEntries(sessionFile: string): Promise<Fi
       return null;
     }
 
-    const tailStart = Math.max(0, size - SUCCESSOR_ROTATION_TAIL_BYTES);
+    const desiredTailStart = Math.max(0, size - SUCCESSOR_ROTATION_TAIL_BYTES);
+    const tailStart = await findSuccessorRotationRecordStart(handle, desiredTailStart);
+    if (tailStart === null) {
+      return null;
+    }
     if (tailStart <= headRead.bytesRead) {
       return null;
     }
@@ -1003,13 +1007,36 @@ async function readSuccessorRotationFileEntries(sessionFile: string): Promise<Fi
     const tailRead = await handle.read(tailBuffer, 0, tailBytes, tailStart);
     const tailRecords = parseCompleteJsonlRecords(
       tailBuffer.toString("utf-8", 0, tailRead.bytesRead),
-      { dropLeadingPartial: tailStart > 0, dropTrailingPartial: false },
+      { dropLeadingPartial: false, dropTrailingPartial: false },
     );
 
     return [header, ...tailRecords].map(fileEntryOrMigrationSlot);
   } finally {
     await handle.close();
   }
+}
+
+async function findSuccessorRotationRecordStart(
+  handle: Awaited<ReturnType<typeof fs.open>>,
+  desiredStart: number,
+): Promise<number | null> {
+  if (desiredStart <= 0) {
+    return 0;
+  }
+
+  const searchStart = Math.max(0, desiredStart - SUCCESSOR_ROTATION_PREFIX_SCAN_BYTES);
+  const bytesToRead = desiredStart - searchStart;
+  const buffer = Buffer.allocUnsafe(bytesToRead);
+  const read = await handle.read(buffer, 0, bytesToRead, searchStart);
+  if (read.bytesRead !== bytesToRead) {
+    return null;
+  }
+
+  const newlineIndex = buffer.lastIndexOf(0x0a);
+  if (newlineIndex < 0) {
+    return searchStart === 0 ? 0 : null;
+  }
+  return searchStart + newlineIndex + 1;
 }
 
 async function hasSuccessorRotationCarryEntryBefore(

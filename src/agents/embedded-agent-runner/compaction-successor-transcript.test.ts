@@ -13,6 +13,7 @@ import {
 import { hardenManualCompactionBoundary } from "./manual-compaction-boundary.js";
 
 let tmpDir: string | undefined;
+const SUCCESSOR_ROTATION_TAIL_BYTES = 512 * 1024;
 
 async function createTmpDir(): Promise<string> {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "compaction-successor-test-"));
@@ -103,6 +104,57 @@ function readUserTexts(entries: readonly TranscriptEntry[]): string[] {
         ? entry.message.content
         : JSON.stringify(entry.message.content);
     });
+}
+
+async function placeEntryAcrossTailBoundary(params: {
+  sessionFile: string;
+  entryId: string;
+  fillerId: string;
+}): Promise<void> {
+  const records = (await fs.readFile(params.sessionFile, "utf8"))
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  const entryIndex = records.findIndex((entry) => entry.id === params.entryId);
+  const fillerIndex = records.findIndex((entry) => entry.id === params.fillerId);
+  if (entryIndex < 0 || fillerIndex <= entryIndex) {
+    throw new Error("expected boundary entry before filler");
+  }
+
+  const filler = records[fillerIndex];
+  const fillerMessage = filler?.message;
+  if (!fillerMessage || typeof fillerMessage !== "object" || !("content" in fillerMessage)) {
+    throw new Error("expected filler message content");
+  }
+  fillerMessage.content = "";
+
+  const serialized = records.map((entry) => JSON.stringify(entry));
+  const entryLineBytes = Buffer.byteLength(`${serialized[entryIndex]}\n`);
+  const emptyFillerBytes = Buffer.byteLength(`${serialized[fillerIndex]}\n`);
+  const otherBytesAfterEntry = serialized.reduce((total, line, index) => {
+    if (index <= entryIndex || index === fillerIndex) {
+      return total;
+    }
+    return total + Buffer.byteLength(`${line}\n`);
+  }, 0);
+  const targetOffset = 2;
+  const fillerContentBytes =
+    SUCCESSOR_ROTATION_TAIL_BYTES -
+    entryLineBytes +
+    targetOffset -
+    otherBytesAfterEntry -
+    emptyFillerBytes;
+  if (fillerContentBytes <= 0) {
+    throw new Error("expected positive boundary filler size");
+  }
+  fillerMessage.content = "x".repeat(fillerContentBytes);
+
+  const alignedLines = records.map((entry) => JSON.stringify(entry));
+  const alignedRaw = `${alignedLines.join("\n")}\n`;
+  const entryStart = Buffer.byteLength(`${alignedLines.slice(0, entryIndex).join("\n")}\n`);
+  const tailStart = Buffer.byteLength(alignedRaw) - SUCCESSOR_ROTATION_TAIL_BYTES;
+  expect(tailStart - entryStart).toBe(targetOffset);
+  await fs.writeFile(params.sessionFile, alignedRaw);
 }
 
 function createCompactedSession(sessionDir: string): {
@@ -419,6 +471,53 @@ describe("rotateTranscriptAfterCompaction", () => {
     );
     expect(branchSummary.summary).toBe("Preserved sibling branch summary.");
     expect(customMessage.content).toBe("preserved sibling custom message");
+  });
+
+  it("falls back for preserved state that crosses the sampled tail boundary", async () => {
+    const dir = await createTmpDir();
+    const manager = SessionManager.create(dir, dir);
+
+    manager.appendMessage({ role: "user", content: "old request", timestamp: 1 });
+    manager.appendMessage(makeAssistant("old response", 2));
+    const modelChangeId = manager.appendModelChange("anthropic", "claude-opus-4-8");
+    manager.appendMessage(makeAssistant("preserved assistant", 3));
+    const fillerId = manager.appendMessage({ role: "user", content: "padding", timestamp: 4 });
+    const firstKeptId = manager.appendMessage({
+      role: "user",
+      content: "kept deployment prompt",
+      timestamp: 5,
+    });
+    manager.appendMessage(makeAssistant("kept deployment answer", 6));
+    manager.appendCompaction("Summary of the old request.", firstKeptId, 200_000);
+    manager.appendMessage({ role: "user", content: "post compaction followup", timestamp: 7 });
+
+    const sessionFile = requireString(manager.getSessionFile(), "source session file");
+    const sourcePath = path.resolve(sessionFile);
+    await placeEntryAcrossTailBoundary({
+      sessionFile: sourcePath,
+      entryId: modelChangeId,
+      fillerId,
+    });
+    const readFileSpy = vi.spyOn(fs, "readFile");
+
+    const result = await rotateTranscriptFileAfterCompaction({
+      sessionFile: sourcePath,
+      now: () => new Date("2026-07-09T21:00:00.000Z"),
+    });
+
+    expect(result.rotated).toBe(true);
+    expect(readFileSpy.mock.calls.some(([file]) => readFileCallMatchesPath(file, sourcePath))).toBe(
+      true,
+    );
+    const successor = SessionManager.open(requireString(result.sessionFile, "successor file"));
+    const modelChange = requireEntryByIdAndType(
+      successor.getEntries(),
+      modelChangeId,
+      "model_change",
+      "boundary model change",
+    );
+    expect(modelChange.provider).toBe("anthropic");
+    expect(modelChange.modelId).toBe("claude-opus-4-8");
   });
 
   it("keeps the paired tool result without replaying summarized custom context", async () => {
