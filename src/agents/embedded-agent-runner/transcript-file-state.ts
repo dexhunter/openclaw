@@ -1003,6 +1003,9 @@ async function readSuccessorRotationFileEntries(sessionFile: string): Promise<Fi
     if (await hasSuccessorRotationCarryEntryBefore(handle, tailStart)) {
       return null;
     }
+    if (await hasSuccessorRotationSiblingBranchBefore(handle, tailStart)) {
+      return null;
+    }
 
     const tailBytes = size - tailStart;
     const tailBuffer = Buffer.allocUnsafe(tailBytes);
@@ -1065,6 +1068,60 @@ async function hasSuccessorRotationCarryEntryBefore(
     }
   }
   return lineHasSuccessorRotationCarryEntry(pending);
+}
+
+// A sampled tail cannot preserve an inactive branch whose ordinary messages
+// are entirely in the prefix. Detect actual branching without materializing
+// the prefix; linear message history remains eligible for the fast path.
+async function hasSuccessorRotationSiblingBranchBefore(
+  handle: Awaited<ReturnType<typeof fs.open>>,
+  end: number,
+): Promise<boolean> {
+  const buffer = Buffer.allocUnsafe(Math.min(SUCCESSOR_ROTATION_PREFIX_SCAN_BYTES, end));
+  const childrenByParent = new Map<string | null, string>();
+  let pending = "";
+  let position = 0;
+  while (position < end) {
+    const bytesToRead = Math.min(buffer.byteLength, end - position);
+    const read = await handle.read(buffer, 0, bytesToRead, position);
+    if (read.bytesRead <= 0) {
+      break;
+    }
+    position += read.bytesRead;
+    const chunk = pending + buffer.toString("utf-8", 0, read.bytesRead);
+    const lines = chunk.split("\n");
+    pending = lines.pop() ?? "";
+    for (const line of lines) {
+      if (lineHasSuccessorRotationSiblingBranch(line, childrenByParent)) {
+        return true;
+      }
+    }
+  }
+  return lineHasSuccessorRotationSiblingBranch(pending, childrenByParent);
+}
+
+function lineHasSuccessorRotationSiblingBranch(
+  line: string,
+  childrenByParent: Map<string | null, string>,
+): boolean {
+  if (!line.includes('"type":"message"') && !line.includes('"type":"leaf"')) {
+    return false;
+  }
+  try {
+    const entry: unknown = JSON.parse(line);
+    if (!isRecord(entry) || typeof entry.id !== "string") {
+      return false;
+    }
+    const parentId = typeof entry.parentId === "string" ? entry.parentId : null;
+    const firstChild = childrenByParent.get(parentId);
+    if (!firstChild) {
+      childrenByParent.set(parentId, entry.id);
+      return false;
+    }
+    return firstChild !== entry.id;
+  } catch {
+    return false;
+  }
 }
 
 function lineHasSuccessorRotationCarryEntry(line: string): boolean {
