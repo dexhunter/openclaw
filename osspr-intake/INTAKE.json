@@ -1,0 +1,50 @@
+[
+  {
+    "upstream_repo": "openclaw/openclaw",
+    "head_sha": "5adfac3d9e0d0bfee5cdf125b4e90ee9a85da97b",
+    "file": "src/logging/redacting-stream.ts",
+    "function": "createRedactingStreamWriter",
+    "native_test_cmd": "pnpm test src/logging/redacting-stream.test.ts",
+    "bench_cmd": "node --expose-gc --import ./scripts/tsx.mjs ./osspr-intake/harness/redacting-stream-peak.mts",
+    "metric_kind": "peak_memory_bytes",
+    "baseline_value": 55454576,
+    "baseline_noise_pct": 0.005,
+    "metric_benchmark": "node --expose-gc --import ./scripts/tsx.mjs ./osspr-intake/harness/redacting-stream-peak.mts",
+    "labeled_data": null,
+    "tests_pass_on_baseline": true,
+    "workload": "One 1,680,009-character progress log buffer with secret gw-secret-token absent, written and flushed through the redacting stream.",
+    "notes": "emit appends every non-secret character with output += pending[cursor], so a ~1.7M log leaves about 55MB of temporary strings while the redacted text is the same size as the input. Appending unmatched runs with slice keeps the tested output and the secret-prefix holdback. Overlap: file last changed 2026-09-23 in 741a1c84cd, not in the 30 days before 2026-11-11; open-PR search for redacting-stream.ts hit #167061 but that diff does not include this file; dexhunter PRs #114068 #102994 #101697 #100034 #99714 do not touch it. No open issue says this writer is being moved."
+  },
+  {
+    "upstream_repo": "openclaw/openclaw",
+    "head_sha": "5adfac3d9e0d0bfee5cdf125b4e90ee9a85da97b",
+    "file": "src/utils/safe-json.ts",
+    "function": "safeJsonStringify",
+    "native_test_cmd": "pnpm test src/utils/safe-json.test.ts",
+    "bench_cmd": "node --expose-gc --import ./scripts/tsx.mjs ./osspr-intake/harness/safe-json-peak.mts",
+    "metric_kind": "peak_memory_bytes",
+    "baseline_value": 60713240,
+    "baseline_noise_pct": 2.161,
+    "metric_benchmark": "node --expose-gc --import ./scripts/tsx.mjs ./osspr-intake/harness/safe-json-peak.mts",
+    "labeled_data": null,
+    "tests_pass_on_baseline": true,
+    "workload": "Diagnostic object whose data field is a 2MiB Buffer filled with byte 7, the usual Node type for logged file and image bytes.",
+    "notes": "JSON.stringify calls Buffer#toJSON before the Uint8Array branch, so a 2MiB payload becomes an array of 2 million numbers and peaks near 61MB while the JSON text is only about 4MB of decimal digits. Writing those same digits without the number array keeps the current Buffer JSON and the tested Uint8Array base64 path. Overlap: file last changed 2026-10-06 in 83908d3f49, before the 30-day window; open-PR text search hit #166464 #176536 #137594 and none of those diffs include this file; dexhunter PRs #114068 #102994 #101697 #100034 #99714 do not touch it."
+  },
+  {
+    "upstream_repo": "openclaw/openclaw",
+    "head_sha": "5adfac3d9e0d0bfee5cdf125b4e90ee9a85da97b",
+    "file": "packages/markdown-core/src/strip-html.ts",
+    "function": "stripHtmlFromMarkdown",
+    "native_test_cmd": "pnpm test src/shared/text/strip-markdown.test.ts",
+    "bench_cmd": "node --expose-gc --import ./scripts/tsx.mjs ./osspr-intake/harness/strip-html-peak.mts",
+    "metric_kind": "peak_memory_bytes",
+    "baseline_value": 22469872,
+    "baseline_noise_pct": 0.212,
+    "metric_benchmark": "node --expose-gc --import ./scripts/tsx.mjs ./osspr-intake/harness/strip-html-peak.mts",
+    "labeled_data": null,
+    "tests_pass_on_baseline": true,
+    "workload": "180,023-character assistant paragraph wrapped in a few inline tags, the same shape as the strip-markdown HTML cases.",
+    "notes": "stripHtmlFromMarkdown asks parseMarkdownOwnership for text spans of the whole string before it removes a handful of tags, and that map peaks near 22MB for this 180KB note. A tag walk in this function can keep the tested visible text, including script, style, comment, and code-span cases. Overlap: file last changed 2026-09-14 in 8a69d41e12, not in the last 30 days; open-PR search for strip-html.ts was empty, and #144324 matched strip-markdown.ts in text search but does not edit either file; dexhunter PRs #114068 #102994 #101697 #100034 #99714 do not touch it. Skipped external-content.ts (#160316), render-aware-chunking.ts (#195464), and redact-json-tokens.ts (#187082) because those open PRs edit the files."
+  }
+]
